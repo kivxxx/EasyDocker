@@ -19,8 +19,9 @@ def ensure_dockerfile(pyfile, custom_content=None):
         f.write(content)
 
 def build_image(image_name='python-app', log_path=None):
-    with open(log_path, 'a', encoding='utf-8') if log_path else open(os.devnull, 'w') as logf:
-        result = subprocess.run(['docker', 'build', '-t', image_name, '.'], capture_output=True, text=True)
+    # 強制用 utf-8 寫 log，避免 Windows 預設編碼問題
+    with open(log_path, 'a', encoding='utf-8', errors='replace') if log_path else open(os.devnull, 'w', encoding='utf-8', errors='replace') as logf:
+        result = subprocess.run(['docker', 'build', '-t', image_name, '.'], capture_output=True, text=True, encoding='utf-8', errors='replace')
         print(result.stdout)
         logf.write(result.stdout)
         if result.returncode == 0:
@@ -30,7 +31,7 @@ def build_image(image_name='python-app', log_path=None):
             print('建立映像檔失敗：')
             print(result.stderr)
             logf.write('建立映像檔失敗：\n')
-            logf.write(result.stderr + '\n')
+            logf.write((result.stderr or '') + '\n')
 
 def check_docker():
     try:
@@ -148,13 +149,47 @@ def auto_generate_requirements(pyfile, lang='zh'):
     try:
         with open(pyfile, 'r', encoding='utf-8') as f:
             code = f.read()
-        imports = re.findall(r'^\s*(?:import|from)\s+([\w_\.]+)', code, re.MULTILINE)
-        stdlibs = set(['os','sys','subprocess','re','datetime'])
+        # 更完整的標準庫清單（Python 3.11）
+        stdlibs = set([
+            'abc','aifc','argparse','array','ast','asynchat','asyncio','asyncore','atexit','audioop','base64','bdb','binascii','binhex','bisect','builtins','bz2',
+            'calendar','cgi','cgitb','chunk','cmath','cmd','code','codecs','codeop','collections','colorsys','compileall','concurrent','configparser','contextlib','contextvars','copy','copyreg','crypt','csv','ctypes','curses','dataclasses','datetime','dbm','decimal','difflib','dis','distutils','doctest','email','encodings','ensurepip','enum','errno','faulthandler','fcntl','filecmp','fileinput','fnmatch','formatter','fractions','ftplib','functools','gc','getopt','getpass','gettext','glob','graphlib','grp','gzip','hashlib','heapq','hmac','html','http','imaplib','imghdr','imp','importlib','inspect','io','ipaddress','itertools','json','keyword','lib2to3','linecache','locale','logging','lzma','mailbox','mailcap','marshal','math','mimetypes','mmap','modulefinder','msilib','msvcrt','multiprocessing','netrc','nntplib','numbers','operator','optparse','os','ossaudiodev','parser','pathlib','pdb','pickle','pickletools','pipes','pkgutil','platform','plistlib','poplib','posix','pprint','profile','pstats','pty','pwd','py_compile','pyclbr','pydoc','queue','quopri','random','re','readline','reprlib','resource','rlcompleter','runpy','sched','secrets','select','selectors','shelve','shlex','shutil','signal','site','smtpd','smtplib','sndhdr','socket','socketserver','spwd','sqlite3','ssl','stat','statistics','string','stringprep','struct','subprocess','sunau','symtable','sys','sysconfig','syslog','tabnanny','tarfile','telnetlib','tempfile','termios','test','textwrap','threading','time','timeit','tkinter','token','tokenize','trace','traceback','tracemalloc','tty','turtle','turtledemo','types','typing','unicodedata','unittest','urllib','uu','uuid','venv','warnings','wave','weakref','webbrowser','winreg','winsound','wsgiref','xdrlib','xml','xmlrpc','zipapp','zipfile','zipimport','zlib'
+        ])
+        # 新增：本地 .py 檔案名稱（不含副檔名）與本地資料夾名稱（視為本地模組）
+        local_py_modules = set(os.path.splitext(f)[0] for f in os.listdir('.') if f.endswith('.py'))
+        local_dirs = set(f for f in os.listdir('.') if os.path.isdir(f) and not f.startswith('__'))
+        local_modules = local_py_modules | local_dirs
+
+        visited = set()
         pkgs = set()
-        for imp in imports:
-            root = imp.split('.')[0]
-            if root not in stdlibs:
+
+        def visit_file(filename):
+            if filename in visited:
+                return
+            visited.add(filename)
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    code = f.read()
+            except Exception:
+                return
+            imports = re.findall(r'^\s*(?:import|from)\s+([\w_\.]+)', code, re.MULTILINE)
+            for imp in imports:
+                root = imp.split('.')[0]
+                if root in stdlibs:
+                    continue
+                if root in local_modules:
+                    # 遞迴分析本地模組
+                    # 先找 .py 檔，再找資料夾/__init__.py
+                    py_path = root + '.py'
+                    dir_init_path = os.path.join(root, '__init__.py')
+                    if os.path.isfile(py_path):
+                        visit_file(py_path)
+                    elif os.path.isfile(dir_init_path):
+                        visit_file(dir_init_path)
+                    continue
                 pkgs.add(root)
+
+        visit_file(pyfile)
+
         if pkgs:
             with open('requirements.txt', 'w', encoding='utf-8') as f:
                 for p in sorted(pkgs):
